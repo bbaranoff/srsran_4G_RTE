@@ -10,4 +10,11 @@ nano /root/.config/srsran/rr.conf (<= TAC same as epc.conf)
 Set an IMSI listening on arfcn 871
 run srsepc,srsenb
 Wait... then f(android_version or idk what) ping pong 5G-NSA <-> GSM or stay from 5G-NSA in GSM
+
+or
+change this in sib7 in sib.conf yes this ! it should do the job for ping pong to gsm at least
+<             si_mapping_info = [ 3 ];
+---
+>             si_mapping_info = [ 7 ];
+
 ```
