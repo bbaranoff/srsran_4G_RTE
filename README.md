@@ -1,4 +1,5 @@
 # srsran_4G_RTE
+```bash
 IMSI catcher reloaded
 Tested on srsran_4G checkout 921f17484e0714f167d48cfe33b0a94ae569c533
 patch -p1 < redir.patch
@@ -9,3 +10,4 @@ nano /root/.config/srsran/rr.conf (<= TAC same as epc.conf)
 Set an IMSI listening on arfcn 871
 run srsepc,srsenb
 Wait... then f(android_version or idk what) ping pong 5G-NSA <-> GSM or stay from 5G-NSA in GSM
+```
